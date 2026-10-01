@@ -8,7 +8,8 @@ import { useUser } from '@clerk/expo';
 import { 
   Search, ChevronRight, Calendar, Clock, 
   LayoutGrid, CheckCircle2, Home, FolderKanban, Users, Target, 
-  TrendingUp, BarChart3, Rocket, Settings
+  TrendingUp, BarChart3, Rocket, Settings,
+  RoadIcon
 } from 'lucide-react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Link } from 'expo-router';

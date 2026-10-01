@@ -1,5 +1,5 @@
-import { useAuth, useSignUp } from '@clerk/expo';
-import { useState } from 'react';
+import { useAuth, useSignUp, useSignIn } from '@clerk/expo';
+import { useState, useEffect } from 'react';
 import { 
   Text, 
   TextInput, 
@@ -7,57 +7,74 @@ import {
   Pressable, 
   KeyboardAvoidingView, 
   Platform, 
-  ScrollView, 
+  ScrollView,
   ActivityIndicator,
   Alert
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import { Redirect, router } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons'; // Ensure @expo/vector-icons is installed
+import { router } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 
-export default function MainScreen() {
+export default function AuthScreen() {
   const { isLoaded, isSignedIn } = useAuth();
-  const { signUp, setActive } = useSignUp();
+  
+  const { signUp, setActive: setSignUpActive } = useSignUp();
+  const { signIn, setActive: setSignInActive } = useSignIn();
 
+  const [isSignInMode, setIsSignInMode] = useState(true);
   const [emailAddress, setEmailAddress] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   
   const [isVerifying, setIsVerifying] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  
   const [focusedInput, setFocusedInput] = useState<'email' | 'password' | 'code' | null>(null);
 
-const handleSignUp = async () => {
+  // Automatically redirect to Dashboard once authenticated
+  useEffect(() => {
+    if (isSignedIn) {
+      router.replace('/(tabs)/dashboard');
+    }
+  }, [isSignedIn]);
+
+  const handleSignIn = async () => {
+    if (!isLoaded || !signIn) return;
+    setIsLoading(true);
+    
+    try {
+      const completeSignIn = await signIn.create({
+        identifier: emailAddress,
+        password,
+      });
+
+      if (completeSignIn.status === 'complete') {
+        await setSignInActive({ session: completeSignIn.createdSessionId });
+        // The useEffect will handle the redirect once isSignedIn becomes true
+      } else {
+        console.warn('Sign in requires additional steps:', completeSignIn.status);
+      }
+    } catch (err: any) {
+      const errorMessage = err.errors?.[0]?.longMessage || err.message || "Invalid email or password.";
+      Alert.alert("Sign In Failed", errorMessage);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSignUp = async () => {
     if (!isLoaded || !signUp) return;
     setIsLoading(true);
     
     try {
-      // Safely check for Clerk Core 3 (The Newest 2026 API)
-      if (signUp.verifications && typeof signUp.verifications.sendEmailCode === 'function') {
-        const { error } = await signUp.password({ emailAddress, password });
-        if (error) throw new Error(error.message);
-        
-        const { error: sendError } = await signUp.verifications.sendEmailCode();
-        if (sendError) throw new Error(sendError.message);
-        
-      } else {
-        // Fallback for Clerk v4 / v5 (Older APIs)
-        await signUp.create({ emailAddress, password });
-
-        if (typeof signUp.prepareVerification === 'function') {
-          await signUp.prepareVerification({ strategy: 'email_code' });
-        } else if (typeof (signUp as any).prepareEmailAddressVerification === 'function') {
-          await (signUp as any).prepareEmailAddressVerification({ strategy: 'email_code' });
-        } else {
-          throw new Error("Could not find a valid verification method for this Clerk version.");
-        }
-      }
+      const { error } = await signUp.password({ emailAddress, password });
+      if (error) throw new Error(error.message);
+      
+      const { error: sendError } = await signUp.verifications.sendEmailCode();
+      if (sendError) throw new Error(sendError.message);
       
       setIsVerifying(true);
     } catch (err: any) {
-      console.error("Clerk Sign Up Error:", err);
       const errorMessage = err.errors?.[0]?.longMessage || err.message || "An error occurred";
       Alert.alert("Sign Up Failed", errorMessage);
     } finally {
@@ -70,35 +87,15 @@ const handleSignUp = async () => {
     setIsLoading(true);
     
     try {
-      // Safely check for Clerk Core 3 (The Newest 2026 API)
-      if (signUp.verifications && typeof signUp.verifications.verifyEmailCode === 'function') {
-        const { error: verifyError } = await signUp.verifications.verifyEmailCode({ code });
-        if (verifyError) throw new Error(verifyError.message);
-        
-        if (signUp.status === 'complete') {
-          await signUp.finalize();
-          // setActive is handled automatically by .finalize() in Core 3
-        }
-      } else {
-        // Fallback for Clerk v4 / v5 (Older APIs)
-        let completeSignUp: any;
-        
-        if (typeof signUp.attemptVerification === 'function') {
-          completeSignUp = await signUp.attemptVerification({ strategy: 'email_code', code });
-        } else if (typeof (signUp as any).attemptEmailAddressVerification === 'function') {
-          completeSignUp = await (signUp as any).attemptEmailAddressVerification({ code });
-        } else {
-          throw new Error("Could not find a valid verify method for this Clerk version.");
-        }
-
-        if (completeSignUp.status === 'complete') {
-          await setActive({ session: completeSignUp.createdSessionId });
-        } else {
-          console.warn('Sign up incomplete:', completeSignUp);
-        }
+      const { error: verifyError } = await signUp.verifications.verifyEmailCode({ code });
+      if (verifyError) throw new Error(verifyError.message);
+      
+      if (signUp.status === 'complete') {
+        await signUp.finalize();
+        await setSignUpActive({ session: signUp.createdSessionId });
+        // The useEffect will handle the redirect once isSignedIn becomes true
       }
     } catch (err: any) {
-      console.error("Clerk Verify Error:", err);
       const errorMessage = err.errors?.[0]?.longMessage || err.message || "Invalid code";
       Alert.alert("Verification Failed", errorMessage);
     } finally {
@@ -106,10 +103,31 @@ const handleSignUp = async () => {
     }
   };
 
+  const handleSubmit = () => {
+    if (isSignInMode) {
+      handleSignIn();
+    } else {
+      handleSignUp();
+    }
+  };
+
+  // Prevent UI rendering until Clerk is fully loaded
   if (!isLoaded) return null;
 
+  // Show a clean loading state if authenticated to prevent the login screen from flashing before the redirect
   if (isSignedIn) {
-    return <Redirect href="/(tabs)/dashboard" />;
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#09090B' }}>
+        <View className="flex-1 items-center justify-center p-6">
+          <View className="w-20 h-20 bg-indigo-500/10 rounded-full items-center justify-center mb-6">
+            <Ionicons name="shield-checkmark" size={40} color="#818CF8" />
+          </View>
+          <Text className="text-white text-3xl font-black tracking-tight mb-2">Authenticated</Text>
+          <Text className="text-zinc-400 text-base font-medium">Securing your workspace...</Text>
+          <ActivityIndicator size="small" color="#818CF8" style={{ marginTop: 20 }} />
+        </View>
+      </SafeAreaView>
+    );
   }
 
   return (
@@ -119,7 +137,6 @@ const handleSignUp = async () => {
       {/* Immersive Ambient Background */}
       <View className="absolute top-[-10%] right-[-20%] w-[500px] h-[500px] bg-indigo-600/15 rounded-full blur-[100px]" />
       <View className="absolute bottom-[-10%] left-[-20%] w-[500px] h-[500px] bg-fuchsia-600/15 rounded-full blur-[100px]" />
-      <View className="absolute top-[40%] left-[10%] w-[300px] h-[300px] bg-cyan-500/5 rounded-full blur-[120px]" />
 
       <KeyboardAvoidingView 
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -142,7 +159,6 @@ const handleSignUp = async () => {
                 </Text>
               </View>
 
-              {/* Back button for UX during verification */}
               {isVerifying && (
                 <Pressable onPress={() => setIsVerifying(false)} className="p-2">
                   <Text className="text-zinc-400 text-sm font-semibold">Change Email</Text>
@@ -150,17 +166,15 @@ const handleSignUp = async () => {
               )}
             </View>
             
-            {/* Startup Club Style Highlighted Typography */}
             <View className="flex-row flex-wrap items-end mb-3">
               <Text className="text-white text-[44px] font-black tracking-tight leading-none">
-                {isVerifying ? 'Check your ' : 'Start '}
+                {isVerifying ? 'Check your ' : isSignInMode ? 'Welcome ' : 'Start '}
               </Text>
               
               <View className="relative px-1">
-                {/* Sleeker Marker Highlight */}
                 <View className={`absolute bottom-1 left-0 right-0 h-4 rounded-sm ${isVerifying ? 'bg-fuchsia-500/80' : 'bg-indigo-500/80'}`} />
                 <Text className="text-white text-[44px] font-black tracking-tight leading-none relative z-10">
-                  {isVerifying ? 'inbox.' : 'building.'}
+                  {isVerifying ? 'inbox.' : isSignInMode ? 'back.' : 'building.'}
                 </Text>
               </View>
             </View>
@@ -168,9 +182,11 @@ const handleSignUp = async () => {
             <Text className="text-zinc-400 text-base font-medium leading-relaxed mt-2">
               {isVerifying 
                 ? `We sent a secure code to ` 
+                : isSignInMode 
+                ? 'Sign in to access your dashboard. '
                 : 'Join top founders and elite teams. '}
               <Text className="text-zinc-200 font-bold">
-                {isVerifying ? emailAddress : 'No credit card required.'}
+                {isVerifying ? emailAddress : isSignInMode ? '' : 'No credit card required.'}
               </Text>
             </Text>
           </View>
@@ -181,7 +197,6 @@ const handleSignUp = async () => {
               
               {!isVerifying ? (
                 <View className="gap-6">
-                  {/* Email Input */}
                   <View>
                     <Text className="text-zinc-400 text-xs font-bold tracking-wider uppercase mb-2 ml-1">Work Email</Text>
                     <View className={`flex-row items-center bg-white/[0.03] border rounded-2xl px-4 py-4 transition-colors ${focusedInput === 'email' ? 'border-indigo-500/50 bg-indigo-500/5' : 'border-white/10'}`}>
@@ -201,7 +216,6 @@ const handleSignUp = async () => {
                     </View>
                   </View>
 
-                  {/* Password Input */}
                   <View>
                     <Text className="text-zinc-400 text-xs font-bold tracking-wider uppercase mb-2 ml-1">Password</Text>
                     <View className={`flex-row items-center bg-white/[0.03] border rounded-2xl px-4 py-4 transition-colors ${focusedInput === 'password' ? 'border-indigo-500/50 bg-indigo-500/5' : 'border-white/10'}`}>
@@ -220,18 +234,17 @@ const handleSignUp = async () => {
                     </View>
                   </View>
 
-                  {/* Submit Button */}
                   <Pressable 
-                    onPress={handleSignUp}
+                    onPress={handleSubmit}
                     disabled={isLoading || !emailAddress || !password}
-                    className={`w-full bg-white rounded-2xl py-4 mt-4 items-center justify-center flex-row shadow-lg active:scale-[0.98] transition-all ${isLoading ? 'opacity-70' : 'opacity-100 shadow-white/20'}`}
+                    className={`w-full bg-white rounded-2xl py-4 mt-4 items-center justify-center flex-row shadow-lg active:scale-[0.98] transition-all ${(isLoading || !emailAddress || !password) ? 'opacity-50' : 'opacity-100 shadow-white/20'}`}
                   >
                     {isLoading ? (
                       <ActivityIndicator color="#09090B" />
                     ) : (
                       <>
                         <Text className="text-zinc-950 font-black text-[17px] mr-2">
-                          Create Account
+                          {isSignInMode ? 'Sign In' : 'Create Account'}
                         </Text>
                         <Ionicons name="arrow-forward" size={20} color="#09090B" />
                       </>
@@ -240,7 +253,6 @@ const handleSignUp = async () => {
                 </View>
               ) : (
                 <View className="gap-6">
-                  {/* Verification Code Input */}
                   <View>
                     <Text className="text-zinc-400 text-xs font-bold tracking-wider uppercase mb-2 ml-1">6-Digit Code</Text>
                     <View className={`flex-row items-center bg-white/[0.03] border rounded-2xl px-4 py-5 transition-colors ${focusedInput === 'code' ? 'border-fuchsia-500/50 bg-fuchsia-500/5' : 'border-white/10'}`}>
@@ -260,7 +272,6 @@ const handleSignUp = async () => {
                     </View>
                   </View>
 
-                  {/* Verify Button */}
                   <Pressable 
                     onPress={handleVerify}
                     disabled={isLoading || code.length < 6}
@@ -280,27 +291,13 @@ const handleSignUp = async () => {
             </View>
           </View>
 
-          {/* Bottom Footer Section */}
           <View className="mt-10 items-center">
-            {/* Enterprise Trust Marker */}
             <View className="flex-row items-center mb-6 opacity-60">
               <Ionicons name="shield-checkmark" size={14} color="#A1A1AA" />
               <Text className="text-zinc-400 text-[11px] font-bold uppercase tracking-[0.15em] ml-2">
                 Enterprise-Grade Encryption
               </Text>
             </View>
-
-            {/* Login Redirect */}
-            {!isVerifying && (
-              <Pressable 
-                onPress={() => router.push('/sign-in')} // Update with your actual sign-in route
-                className="flex-row items-center p-2"
-              >
-                <Text className="text-zinc-400 text-sm font-medium">
-                  Already have an account? <Text className="text-white font-bold">Sign In</Text>
-                </Text>
-              </Pressable>
-            )}
           </View>
           
           <View nativeID="clerk-captcha" />

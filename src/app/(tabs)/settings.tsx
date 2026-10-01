@@ -85,25 +85,6 @@ export default function SettingsPage() {
     }
   };
 
-  // --- FEATURE: Secure Sign Out & Redirect ---
-  const handleSignOut = () => {
-    Alert.alert('Secure Sign Out', 'Are you sure you want to securely log out of your workspace?', [
-      { text: 'Cancel', style: 'cancel' },
-      { 
-        text: 'Log Out', 
-        style: 'destructive', 
-        onPress: async () => {
-          try {
-            await signOut();
-            // Force route to authentication page immediately after clearing session
-            router.replace('/(auth)/authentication');
-          } catch (error) {
-            console.error('Error signing out:', error);
-          }
-        } 
-      }
-    ]);
-  };
 
   // --- Security Fallback: If page mounts but user is logged out, redirect immediately ---
   if (isLoaded && !isSignedIn) {
@@ -276,16 +257,6 @@ export default function SettingsPage() {
 
             </View>
           </View>
-
-          {/* --- Danger Zone --- */}
-          <View style={styles.section}>
-            <TouchableOpacity style={styles.logoutBtn} onPress={handleSignOut}>
-              <LogOut size={20} color="#EF4444" />
-              <Text style={styles.logoutBtnText}>Secure Sign Out</Text>
-            </TouchableOpacity>
-            <Text style={styles.versionText}>Projecter App v2.4.0 (Enterprise)</Text>
-          </View>
-
         </ScrollView>
       </KeyboardAvoidingView>
 

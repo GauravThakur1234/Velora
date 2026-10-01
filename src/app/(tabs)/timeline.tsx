@@ -1,58 +1,79 @@
-import React, { useEffect, useState, useCallback } from 'react';
+// timeline.tsx
+// ⚠️ SUPABASE PREREQUISITE: Run this in your Supabase SQL Editor to support the new features:
+// ALTER TABLE user_daily_schedule ADD COLUMN IF NOT EXISTS task_date DATE DEFAULT CURRENT_DATE;
+// ALTER TABLE user_daily_schedule ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'NORMAL';
+// ALTER TABLE user_daily_schedule ADD COLUMN IF NOT EXISTS description TEXT;
+
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { 
   View, Text, ScrollView, TouchableOpacity, 
   ActivityIndicator, TextInput, StyleSheet, Modal, 
   KeyboardAvoidingView, Platform, RefreshControl, Alert,
-  LayoutAnimation, UIManager, Image,
-  Settings
+  LayoutAnimation, UIManager, Animated, Dimensions
 } from 'react-native';
 import { useUser } from '@clerk/expo';
 import { supabase } from '../lib/supabase';
 import { 
   Plus, CheckCircle2, Sparkles, X, Trash2, 
   LayoutGrid, ProjectorIcon, Calendar, Users, HomeIcon, Briefcase,
-  TimelineIcon,
-  SettingsIcon
+  TimelineIcon, SettingsIcon, Clock, Flame, ChevronRight, Edit3, Circle,
+  BarChart2, Zap
 } from 'lucide-react-native';
 import { Link } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-// Enable LayoutAnimation for Android
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
+const { width } = Dimensions.get('window');
+
 // --- Types & Configurations ---
-type TimelineCategory = 'ADMIN' | 'BUILD' | 'MARKET' | 'BREAK';
+type TimelineCategory = 'ADMIN' | 'BUILD' | 'MARKET' | 'BREAK' | 'MEETING';
+type Priority = 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT';
 
 type TimelineTask = {
   id: string;
   clerk_user_id: string;
   title: string;
+  description: string | null;
   start_time: string;
   end_time: string;
+  task_date: string;
   category: TimelineCategory;
   project_name: string | null;
+  priority: Priority;
   is_completed: boolean;
   is_now: boolean;
 };
 
-const CATEGORY_CONFIG: Record<TimelineCategory, { color: string, bg: string }> = {
-  ADMIN: { color: '#60A5FA', bg: 'rgba(96, 165, 250, 0.15)' },
-  BUILD: { color: '#D4D4D8', bg: 'rgba(212, 212, 216, 0.15)' },
-  MARKET: { color: '#F472B6', bg: 'rgba(244, 114, 182, 0.15)' },
-  BREAK: { color: '#10B981', bg: 'rgba(16, 185, 129, 0.15)' },
+const CATEGORY_CONFIG: Record<TimelineCategory, { color: string, bg: string, icon: any }> = {
+  ADMIN: { color: '#60A5FA', bg: 'rgba(96, 165, 250, 0.12)', icon: Briefcase },
+  BUILD: { color: '#818CF8', bg: 'rgba(129, 140, 248, 0.12)', icon: Zap },
+  MARKET: { color: '#F472B6', bg: 'rgba(244, 114, 182, 0.12)', icon: BarChart2 },
+  BREAK: { color: '#10B981', bg: 'rgba(16, 185, 129, 0.12)', icon: Clock },
+  MEETING: { color: '#FBBF24', bg: 'rgba(251, 191, 36, 0.12)', icon: Users },
 };
 
 const PROJECTS = [
   { name: 'Core Platform', icon: '🚀' },
   { name: 'Marketing Site', icon: '📱' },
   { name: 'Internal Tools', icon: '⚙️' },
+  { name: 'Client Work', icon: '💼' },
   { name: 'No Project', icon: '⚪' },
 ];
 
-// Helper: Convert '13:30:00' to '1:30 PM'
+const PRIORITIES: Record<Priority, { color: string, icon: any }> = {
+  LOW: { color: '#71717A', icon: Circle },
+  NORMAL: { color: '#60A5FA', icon: Circle },
+  HIGH: { color: '#F97316', icon: Flame },
+  URGENT: { color: '#EF4444', icon: Flame },
+};
+
+// --- Helpers ---
+const getTodayString = () => new Date().toISOString().split('T')[0];
+
 const formatTime = (timeStr: string) => {
   if (!timeStr) return '';
   const [h, m] = timeStr.split(':');
@@ -62,26 +83,61 @@ const formatTime = (timeStr: string) => {
   return `${formattedHours}:${m} ${ampm}`;
 };
 
-export default function TimelineSchedule() {
-  const { user, isLoaded } = useUser();
+const generateDateStrip = () => {
+  const dates = [];
+  const today = new Date();
+  for (let i = -3; i <= 14; i++) {
+    const d = new Date(today);
+    d.setDate(today.getDate() + i);
+    dates.push({
+      dateStr: d.toISOString().split('T')[0],
+      dayName: d.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase(),
+      dayNum: d.getDate(),
+      isToday: i === 0,
+    });
+  }
+  return dates;
+};
 
+export default function EnhancedTimelineSchedule() {
+  const { user, isLoaded } = useUser();
+  
+  // State
+  const [selectedDate, setSelectedDate] = useState(getTodayString());
   const [tasks, setTasks] = useState<TimelineTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [quickAddText, setQuickAddText] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [dates] = useState(generateDateStrip());
   
+  // Progress Animation
+  const progressAnim = useRef(new Animated.Value(0)).current;
+
   // Modal State
   const [modalVisible, setModalVisible] = useState(false);
+  const [actionModalVisible, setActionModalVisible] = useState(false);
+  const [selectedTask, setSelectedTask] = useState<TimelineTask | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [formData, setFormData] = useState<Partial<TimelineTask>>({ 
-    start_time: '09:00:00', end_time: '10:00:00', category: 'BUILD', project_name: PROJECTS[0].name 
+    start_time: '09:00', end_time: '10:00', category: 'BUILD', project_name: PROJECTS[0].name, priority: 'NORMAL', task_date: getTodayString()
   });
 
   useEffect(() => {
     if (isLoaded && user) fetchTasks();
-  }, [isLoaded, user]);
+  }, [isLoaded, user, selectedDate]);
 
-  // --- CRUD: READ (Secured by Clerk ID) ---
+  useEffect(() => {
+    const completed = tasks.filter(t => t.is_completed).length;
+    const total = tasks.length;
+    const percentage = total === 0 ? 0 : (completed / total) * 100;
+    
+    Animated.timing(progressAnim, {
+      toValue: percentage,
+      duration: 800,
+      useNativeDriver: false,
+    }).start();
+  }, [tasks]);
+
+  // --- CRUD Operations ---
   const fetchTasks = async (isRefresh = false) => {
     if (!user) return;
     try {
@@ -91,149 +147,163 @@ export default function TimelineSchedule() {
       const { data, error } = await supabase
         .from('user_daily_schedule')
         .select('*')
-        .eq('clerk_user_id', user.id) // 🔒 Fetch ONLY this user's schedule
+        .eq('clerk_user_id', user.id)
+        .eq('task_date', selectedDate)
         .order('start_time', { ascending: true });
       
       if (error) throw error;
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setTasks(data || []);
     } catch (error: any) {
-      Alert.alert('Error', error.message);
+      console.error('Fetch error:', error.message);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   };
 
-  const onRefresh = useCallback(() => fetchTasks(true), []);
+  const onRefresh = useCallback(() => fetchTasks(true), [selectedDate]);
 
-  // --- CRUD: CREATE ---
-  const handleQuickAdd = () => {
-    if (!quickAddText.trim()) return;
-    setFormData(prev => ({ ...prev, title: quickAddText }));
+  const openCreateModal = () => {
+    setFormData({
+      title: '', description: '', start_time: '09:00', end_time: '10:00', 
+      category: 'BUILD', project_name: PROJECTS[0].name, priority: 'NORMAL', task_date: selectedDate
+    });
+    setSelectedTask(null);
     setModalVisible(true);
   };
 
   const handleSave = async () => {
     if (!user) return;
     if (!formData.title?.trim() || !formData.start_time || !formData.end_time) {
-      return Alert.alert('Error', 'Please fill all time and title fields.');
+      return Alert.alert('Error', 'Time and title are required.');
     }
     
     try {
       setIsSubmitting(true);
       const payload = {
         title: formData.title,
-        start_time: formData.start_time,
-        end_time: formData.end_time,
+        description: formData.description || null,
+        start_time: formData.start_time.includes(':00') ? formData.start_time : `${formData.start_time}:00`,
+        end_time: formData.end_time.includes(':00') ? formData.end_time : `${formData.end_time}:00`,
+        task_date: formData.task_date || selectedDate,
         category: formData.category,
+        priority: formData.priority,
         project_name: formData.project_name === 'No Project' ? null : formData.project_name,
-        clerk_user_id: user.id, // 🔒 Tie to user
-        is_completed: false,
-        is_now: false
+        clerk_user_id: user.id,
       };
-      
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      const tempId = `temp-${Date.now()}`;
-      setTasks(prev => [...prev, { ...payload, id: tempId } as TimelineTask].sort((a, b) => a.start_time.localeCompare(b.start_time)));
-      setModalVisible(false);
-      setQuickAddText('');
 
-      const { error } = await supabase.from('user_daily_schedule').insert([payload]);
-      if (error) throw error;
+      if (selectedTask) {
+        // Update
+        const { error } = await supabase.from('user_daily_schedule').update(payload).eq('id', selectedTask.id);
+        if (error) throw error;
+      } else {
+        // Insert
+        const { error } = await supabase.from('user_daily_schedule').insert([{ ...payload, is_completed: false, is_now: false }]);
+        if (error) throw error;
+      }
+      
+      setModalVisible(false);
       fetchTasks();
     } catch (error: any) {
       Alert.alert('Sync Failed', error.message);
-      fetchTasks();
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // --- CRUD: UPDATE (Toggle Completion & Now State) ---
   const toggleComplete = async (task: TimelineTask) => {
     if (!user) return;
     const newStatus = !task.is_completed;
-    
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setTasks(prev => prev.map(t => t.id === task.id ? { ...t, is_completed: newStatus, is_now: false } : t));
-    
-    try {
-      await supabase.from('user_daily_schedule').update({ is_completed: newStatus, is_now: false }).eq('id', task.id).eq('clerk_user_id', user.id);
-    } catch (error) {
-      fetchTasks(); 
-    }
+    await supabase.from('user_daily_schedule').update({ is_completed: newStatus, is_now: false }).eq('id', task.id);
+    setActionModalVisible(false);
   };
 
   const setAsNow = async (task: TimelineTask) => {
     if (!user) return;
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    // Unset all other "now" tasks, set this one
-    setTasks(prev => prev.map(t => ({ ...t, is_now: t.id === task.id })));
-    
-    try {
-      await supabase.from('user_daily_schedule').update({ is_now: false }).eq('clerk_user_id', user.id).neq('id', task.id);
-      await supabase.from('user_daily_schedule').update({ is_now: true, is_completed: false }).eq('id', task.id).eq('clerk_user_id', user.id);
-    } catch (error) {
-      fetchTasks(); 
-    }
+    setTasks(prev => prev.map(t => ({ ...t, is_now: t.id === task.id, is_completed: t.id === task.id ? false : t.is_completed })));
+    await supabase.from('user_daily_schedule').update({ is_now: false }).eq('clerk_user_id', user.id).eq('task_date', selectedDate);
+    await supabase.from('user_daily_schedule').update({ is_now: true, is_completed: false }).eq('id', task.id);
+    setActionModalVisible(false);
   };
 
-  // --- CRUD: DELETE ---
   const handleDelete = (id: string) => {
     if (!user) return;
-    Alert.alert('Remove Timeline Block', 'Are you sure?', [
+    Alert.alert('Delete Block', 'Permanently remove this time block?', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete', style: 'destructive', onPress: async () => {
           LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
           setTasks(prev => prev.filter(t => t.id !== id));
-          await supabase.from('user_daily_schedule').delete().eq('id', id).eq('clerk_user_id', user.id);
+          setActionModalVisible(false);
+          await supabase.from('user_daily_schedule').delete().eq('id', id);
         }
       }
     ]);
   };
 
-  if (!isLoaded || (loading && !refreshing)) {
+  const openActionModal = (task: TimelineTask) => {
+    setSelectedTask(task);
+    setActionModalVisible(true);
+  };
+
+  // Dynamic AI Insight Generator
+  const generateInsight = () => {
+    if (tasks.length === 0) return "Your schedule is clear. Plan your day to maximize deep work.";
+    const completed = tasks.filter(t => t.is_completed).length;
+    if (completed === tasks.length) return "Incredible work! You've cleared your entire schedule for today.";
+    
+    const buildTasks = tasks.filter(t => t.category === 'BUILD').length;
+    const adminTasks = tasks.filter(t => t.category === 'ADMIN').length;
+    
+    if (buildTasks > adminTasks) return "Focus heavily on execution today. Protect your deep work blocks from interruptions.";
+    if (adminTasks > 1) return "High operational load today. Try to batch these admin tasks to save cognitive energy.";
+    return "Steady pace ahead. Complete your highest priority task first to build momentum.";
+  };
+
+  if (!isLoaded || (loading && !refreshing && tasks.length === 0)) {
     return (
       <View style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#6366F1" />
-        <Text style={styles.loadingText}>Loading your schedule...</Text>
+        <Text style={styles.loadingText}>Synchronizing Workspace...</Text>
       </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#000000" />
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <StatusBar style="light" backgroundColor="#000000" />
       
-      {/* Top Floating Command Bar */}
-      <View style={styles.topContainer}>
-        <View style={styles.inputRow}>
-          <TextInput 
-            value={quickAddText}
-            onChangeText={setQuickAddText}
-            placeholder="Add something to ship today..."
-            placeholderTextColor="#71717A"
-            style={styles.textInput}
-            onSubmitEditing={handleQuickAdd}
-          />
-          <TouchableOpacity onPress={handleQuickAdd} style={styles.addButton}>
-            <Plus color="#FAFAFA" size={20} strokeWidth={3} />
+      {/* Absolute Ambient Backgrounds */}
+      <View style={[styles.ambientGlow, { top: -50, left: -50, backgroundColor: 'rgba(99, 102, 241, 0.08)' }]} />
+      <View style={[styles.ambientGlow, { top: 100, right: -100, backgroundColor: 'rgba(236, 72, 153, 0.05)' }]} />
+
+      {/* --- Top Header & Date Strip --- */}
+      <View style={styles.headerContainer}>
+        <View style={styles.headerTopRow}>
+          <View>
+            <Text style={styles.greetingText}>Timeline Workspace</Text>
+            <Text style={styles.dateLabel}>{new Date(selectedDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</Text>
+          </View>
+          <TouchableOpacity onPress={openCreateModal} style={styles.fabButton}>
+            <Plus color="#FFF" size={24} />
           </TouchableOpacity>
         </View>
-        
-        <Text style={styles.assignLabel}>Assign to a project — optional</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.projectScroll}>
-          {PROJECTS.map((proj, idx) => {
-            const isSelected = formData.project_name === proj.name;
+
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.dateScroll}>
+          {dates.map((d, i) => {
+            const isSelected = d.dateStr === selectedDate;
             return (
               <TouchableOpacity 
-                key={idx} 
-                onPress={() => setFormData(prev => ({ ...prev, project_name: proj.name }))}
-                style={[styles.projectPill, isSelected && styles.projectPillActive]}
+                key={i} 
+                onPress={() => setSelectedDate(d.dateStr)}
+                style={[styles.dateBlock, isSelected && styles.dateBlockSelected, d.isToday && !isSelected && styles.dateBlockToday]}
               >
-                <Text style={styles.projectPillIcon}>{proj.icon}</Text>
-                <Text style={[styles.projectPillText, isSelected && styles.projectPillTextActive]}>{proj.name}</Text>
+                <Text style={[styles.dateDayName, isSelected && { color: '#000' }]}>{d.dayName}</Text>
+                <Text style={[styles.dateDayNum, isSelected && { color: '#000' }]}>{d.dayNum}</Text>
+                {d.isToday && <View style={[styles.todayDot, isSelected && { backgroundColor: '#000' }]} />}
               </TouchableOpacity>
             );
           })}
@@ -245,98 +315,116 @@ export default function TimelineSchedule() {
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#A1A1AA" />}
       >
-        <View style={styles.scheduleHeaderRow}>
-          <Text style={styles.scheduleTitle}>{user?.firstName?.toUpperCase()}'S SCHEDULE</Text>
-          <View style={styles.generatedBadge}>
-            <Text style={styles.generatedText}>LIVE SYNC</Text>
+        {/* Progress Bar & Insights */}
+        <View style={styles.dashboardCard}>
+          <View style={styles.progressHeader}>
+            <Text style={styles.progressTitle}>DAILY VELOCITY</Text>
+            <Text style={styles.progressStats}>{tasks.filter(t => t.is_completed).length} / {tasks.length} Done</Text>
           </View>
-        </View>
+          
+          <View style={styles.progressBarBg}>
+            <Animated.View style={[styles.progressBarFill, {
+              width: progressAnim.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] })
+            }]} />
+          </View>
 
-        {/* AI/Context Notes Card */}
-        <View style={styles.notesCard}>
-          <View style={styles.notesHeader}>
-            <Sparkles size={14} color="#8B5CF6" />
-            <Text style={styles.notesTitle}>AI COACH NOTES</Text>
+          <View style={styles.aiInsightBox}>
+            <Sparkles size={16} color="#A78BFA" style={{ marginTop: 2 }} />
+            <Text style={styles.aiInsightText}>{generateInsight()}</Text>
           </View>
-          <Text style={styles.notesBody}>
-            Deep work first while nothing can interrupt. Demo video and launch thread are batched back-to-back since they share context. Admin tasks land in the low-energy slot, and the day closes with a fix-it block so tomorrow starts clean.
-          </Text>
         </View>
 
         {/* Timeline List */}
         {tasks.length === 0 ? (
            <View style={styles.emptyContainer}>
-             <Calendar size={48} color="#27272A" />
-             <Text style={styles.emptyTitle}>Your schedule is clear.</Text>
-             <Text style={styles.emptySub}>Type in the command bar above to start planning your day.</Text>
+             <View style={styles.emptyIconBg}>
+               <Calendar size={32} color="#71717A" />
+             </View>
+             <Text style={styles.emptyTitle}>No blocks scheduled</Text>
+             <Text style={styles.emptySub}>Reclaim your day. Tap the + icon above to start time-blocking your objectives.</Text>
            </View>
         ) : (
           <View style={styles.timelineContainer}>
             {tasks.map((task, index) => {
               const isLast = index === tasks.length - 1;
-              const config = CATEGORY_CONFIG[task.category] || CATEGORY_CONFIG.BUILD;
+              const catConfig = CATEGORY_CONFIG[task.category];
+              const prioConfig = PRIORITIES[task.priority];
+              const CategoryIcon = catConfig.icon;
               
-              let dotColor = '#27272A'; // Future (gray)
-              if (task.is_completed) dotColor = '#10B981'; // Completed (emerald)
-              if (task.is_now) dotColor = '#FAFAFA'; // Current (white glow)
+              let statusColor = '#27272A';
+              if (task.is_completed) statusColor = '#10B981';
+              if (task.is_now) statusColor = '#6366F1';
 
               return (
                 <View key={task.id} style={styles.timelineRow}>
-                  
                   {/* Left Column: Time & Line */}
                   <View style={styles.timeColumn}>
-                    <Text style={[styles.timeText, (task.is_now || task.is_completed) && { color: '#FAFAFA' }]}>
+                    <Text style={[styles.timeText, task.is_now && styles.timeTextNow]}>
                       {formatTime(task.start_time).replace(' AM', '').replace(' PM', '')}
                     </Text>
-                    {task.is_now && <Text style={styles.amPmText}>{formatTime(task.start_time).split(' ')[1]}</Text>}
+                    <Text style={styles.amPmText}>{formatTime(task.start_time).split(' ')[1]}</Text>
                     
                     <View style={styles.lineContainer}>
-                      <View style={[styles.timelineDot, { backgroundColor: dotColor }, task.is_now && styles.timelineDotNow]} />
+                      <View style={[styles.timelineDot, { backgroundColor: statusColor, borderColor: task.is_now ? 'rgba(99, 102, 241, 0.4)' : 'transparent', borderWidth: task.is_now ? 4 : 0 }]} />
                       {!isLast && <View style={[styles.timelineLine, task.is_completed && styles.timelineLineCompleted]} />}
                     </View>
                   </View>
 
                   {/* Right Column: Card */}
                   <TouchableOpacity 
-                    onLongPress={() => handleDelete(task.id)}
-                    onPress={() => task.is_completed ? toggleComplete(task) : setAsNow(task)}
-                    activeOpacity={0.8}
-                    style={[styles.taskCard, task.is_now && styles.taskCardNow, task.is_completed && styles.taskCardCompleted]}
+                    onPress={() => openActionModal(task)}
+                    activeOpacity={0.7}
+                    style={[
+                      styles.taskCard, 
+                      task.is_now && styles.taskCardNow, 
+                      task.is_completed && styles.taskCardCompleted,
+                      task.priority === 'URGENT' && !task.is_completed && styles.taskCardUrgent
+                    ]}
                   >
                     <View style={styles.cardHeader}>
-                      <View style={styles.categoryRow}>
-                        <View style={[styles.categoryPill, { backgroundColor: config.bg }]}>
-                          <Text style={[styles.categoryText, { color: config.color }]}>{task.category}</Text>
+                      <View style={styles.badgesRow}>
+                        <View style={[styles.categoryPill, { backgroundColor: catConfig.bg }]}>
+                          <CategoryIcon size={10} color={catConfig.color} style={{ marginRight: 4 }} />
+                          <Text style={[styles.categoryText, { color: catConfig.color }]}>{task.category}</Text>
                         </View>
-                        {task.is_now && (
-                          <View style={styles.nowPill}>
-                            <Text style={styles.nowText}>NOW</Text>
+                        
+                        {task.priority === 'URGENT' && (
+                          <View style={[styles.priorityPill, { backgroundColor: 'rgba(239, 68, 68, 0.15)' }]}>
+                            <Flame size={10} color="#EF4444" style={{ marginRight: 2 }} />
+                            <Text style={[styles.priorityText, { color: '#EF4444' }]}>URGENT</Text>
                           </View>
                         )}
-                        {task.project_name && (
-                          <View style={styles.projectMiniPill}>
-                            <Briefcase size={10} color="#71717A" />
-                            <Text style={styles.projectMiniText}>{task.project_name}</Text>
+                        
+                        {task.is_now && (
+                          <View style={styles.nowBadge}>
+                            <View style={styles.nowPulse} />
+                            <Text style={styles.nowBadgeText}>IN PROGRESS</Text>
                           </View>
                         )}
                       </View>
-                      <Text style={[styles.timeRangeText, task.is_completed && styles.timeRangeCompleted]}>
-                        {formatTime(task.start_time)}–{formatTime(task.end_time)}
+                      <Text style={[styles.durationText, task.is_completed && styles.timeRangeCompleted]}>
+                        {formatTime(task.start_time)} – {formatTime(task.end_time)}
                       </Text>
                     </View>
 
                     <View style={styles.cardBody}>
-                      <Text 
-                        style={[
-                          styles.taskTitle, 
-                          task.is_now && styles.taskTitleNow,
-                          task.is_completed && styles.taskTitleCompleted
-                        ]}
-                      >
-                        {task.title}
-                      </Text>
+                      <View style={{ flex: 1, paddingRight: 12 }}>
+                        <Text style={[styles.taskTitle, task.is_now && styles.taskTitleNow, task.is_completed && styles.taskTitleCompleted]}>
+                          {task.title}
+                        </Text>
+                        {task.project_name && (
+                          <View style={styles.projectContext}>
+                            <Briefcase size={12} color="#71717A" />
+                            <Text style={styles.projectContextText}>{task.project_name}</Text>
+                          </View>
+                        )}
+                      </View>
                       
-                      <TouchableOpacity onPress={() => toggleComplete(task)} style={styles.checkCircleBtn}>
+                      {/* Quick Complete Toggle Button inside Card */}
+                      <TouchableOpacity 
+                        onPress={() => toggleComplete(task)} 
+                        style={[styles.quickCompleteBtn, task.is_completed && styles.quickCompleteBtnActive]}
+                      >
                         <CheckCircle2 color={task.is_completed ? '#10B981' : '#3F3F46'} size={24} />
                       </TouchableOpacity>
                     </View>
@@ -348,199 +436,266 @@ export default function TimelineSchedule() {
         )}
       </ScrollView>
 
-      {/* --- Detailed Creation Modal --- */}
-      <Modal visible={modalVisible} animationType="slide" transparent={true}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+      {/* --- Action Modal (Tap on Task) --- */}
+      <Modal visible={actionModalVisible} animationType="fade" transparent={true}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setActionModalVisible(false)}>
+          <View style={styles.actionSheet}>
             <View style={styles.modalDragIndicator} />
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Schedule Block</Text>
+            <Text style={styles.actionSheetTitle} numberOfLines={1}>{selectedTask?.title}</Text>
+            
+            <TouchableOpacity style={styles.actionButton} onPress={() => selectedTask && toggleComplete(selectedTask)}>
+              <CheckCircle2 size={20} color={selectedTask?.is_completed ? '#A1A1AA' : '#10B981'} />
+              <Text style={[styles.actionButtonText, { color: selectedTask?.is_completed ? '#A1A1AA' : '#10B981' }]}>
+                {selectedTask?.is_completed ? 'Mark as Incomplete' : 'Mark as Completed'}
+              </Text>
+            </TouchableOpacity>
+            
+            {!selectedTask?.is_completed && !selectedTask?.is_now && (
+              <TouchableOpacity style={styles.actionButton} onPress={() => selectedTask && setAsNow(selectedTask)}>
+                <Zap size={20} color="#6366F1" />
+                <Text style={[styles.actionButtonText, { color: '#6366F1' }]}>Start Working on this Now</Text>
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity style={styles.actionButton} onPress={() => { setActionModalVisible(false); setFormData(selectedTask as any); setModalVisible(true); }}>
+              <Edit3 size={20} color="#FAFAFA" />
+              <Text style={styles.actionButtonText}>Edit Time Block</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.actionButton, styles.actionButtonDestructive]} onPress={() => selectedTask && handleDelete(selectedTask.id)}>
+              <Trash2 size={20} color="#EF4444" />
+              <Text style={[styles.actionButtonText, { color: '#EF4444' }]}>Delete Time Block</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* --- Detailed Editor/Create Modal --- */}
+      <Modal visible={modalVisible} animationType="slide" transparent={true}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+          <View style={styles.fullModalContent}>
+            <View style={styles.modalHeaderRow}>
+              <Text style={styles.modalTitle}>{selectedTask ? 'Edit Block' : 'New Block'}</Text>
               <TouchableOpacity onPress={() => setModalVisible(false)} style={styles.closeBtn}>
                 <X color="#A1A1AA" size={20} />
               </TouchableOpacity>
             </View>
             
-            <ScrollView showsVerticalScrollIndicator={false} bounces={false}>
-              <Text style={styles.inputLabel}>BLOCK TITLE</Text>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+              <Text style={styles.inputLabel}>WHAT ARE YOU EXECUTING?</Text>
               <TextInput 
                 value={formData.title} onChangeText={(t) => setFormData({...formData, title: t})}
-                placeholder="What are you working on?" placeholderTextColor="#52525B"
+                placeholder="e.g., Build Authentication Flow" placeholderTextColor="#52525B"
                 style={styles.modalInput}
               />
 
               <View style={styles.rowInputs}>
                 <View style={{ flex: 1, marginRight: 12 }}>
                   <Text style={styles.inputLabel}>START (HH:MM)</Text>
-                  <TextInput value={formData.start_time} onChangeText={(t) => setFormData({...formData, start_time: t})} style={styles.modalInput} />
+                  <TextInput value={formData.start_time} onChangeText={(t) => setFormData({...formData, start_time: t})} style={styles.modalInput} keyboardType="numbers-and-punctuation"/>
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.inputLabel}>END (HH:MM)</Text>
-                  <TextInput value={formData.end_time} onChangeText={(t) => setFormData({...formData, end_time: t})} style={styles.modalInput} />
+                  <TextInput value={formData.end_time} onChangeText={(t) => setFormData({...formData, end_time: t})} style={styles.modalInput} keyboardType="numbers-and-punctuation" />
                 </View>
               </View>
 
-              <Text style={styles.inputLabel}>WORK TYPE</Text>
-              <View style={styles.categoryGrid}>
-                {(['ADMIN', 'BUILD', 'MARKET', 'BREAK'] as TimelineCategory[]).map(cat => {
+              <Text style={styles.inputLabel}>CATEGORY</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 24 }}>
+                {(['BUILD', 'ADMIN', 'MARKET', 'MEETING', 'BREAK'] as TimelineCategory[]).map(cat => {
                   const isSel = formData.category === cat;
-                  const color = CATEGORY_CONFIG[cat].color;
+                  const config = CATEGORY_CONFIG[cat];
                   return (
                     <TouchableOpacity 
                       key={cat} onPress={() => setFormData({...formData, category: cat})}
-                      style={[styles.modalCatBtn, isSel && { backgroundColor: `${color}15`, borderColor: color }]}
+                      style={[styles.modalCatBtn, isSel && { backgroundColor: config.bg, borderColor: config.color }]}
                     >
-                      <Text style={[styles.modalCatText, { color: isSel ? color : '#71717A' }]}>{cat}</Text>
+                      <Text style={[styles.modalCatText, { color: isSel ? config.color : '#71717A' }]}>{cat}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              <Text style={styles.inputLabel}>PRIORITY LEVEL</Text>
+              <View style={styles.priorityGrid}>
+                {(['LOW', 'NORMAL', 'HIGH', 'URGENT'] as Priority[]).map(prio => {
+                  const isSel = formData.priority === prio;
+                  const config = PRIORITIES[prio];
+                  return (
+                    <TouchableOpacity 
+                      key={prio} onPress={() => setFormData({...formData, priority: prio})}
+                      style={[styles.prioBtn, isSel && { backgroundColor: 'rgba(255,255,255,0.05)', borderColor: config.color }]}
+                    >
+                      <Text style={[styles.prioText, { color: isSel ? config.color : '#71717A' }]}>{prio}</Text>
                     </TouchableOpacity>
                   );
                 })}
               </View>
+
+              <Text style={styles.inputLabel}>PROJECT ASSIGNMENT</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 24 }}>
+                {PROJECTS.map(proj => {
+                  const isSel = formData.project_name === proj.name;
+                  return (
+                    <TouchableOpacity 
+                      key={proj.name} onPress={() => setFormData({...formData, project_name: proj.name})}
+                      style={[styles.projectSelectBtn, isSel && styles.projectSelectBtnActive]}
+                    >
+                      <Text style={styles.projectSelectIcon}>{proj.icon}</Text>
+                      <Text style={[styles.projectSelectText, isSel && { color: '#000' }]}>{proj.name}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
             </ScrollView>
 
-            <TouchableOpacity onPress={handleSave} disabled={isSubmitting} style={styles.saveBtn}>
-              {isSubmitting ? <ActivityIndicator color="#000" /> : <Text style={styles.saveBtnText}>Commit to Schedule</Text>}
-            </TouchableOpacity>
+            <View style={styles.modalFooter}>
+              <TouchableOpacity onPress={handleSave} disabled={isSubmitting} style={styles.saveBtn}>
+                {isSubmitting ? <ActivityIndicator color="#000" /> : <Text style={styles.saveBtnText}>Commit to Timeline</Text>}
+              </TouchableOpacity>
+            </View>
           </View>
         </KeyboardAvoidingView>
       </Modal>
 
       {/* --- Unified Bottom Navigation --- */}
       <View style={styles.bottomNav}>
-         <Link href="/(tabs)/dashboard" asChild>
-           <TouchableOpacity style={styles.bottomTab}>
-              <HomeIcon size={22} color="#71717A" />
-              <Text style={styles.bottomTabText}>Home</Text>
-           </TouchableOpacity>
-         </Link>
-         <Link href="/(tabs)/kanban" asChild>
-           <TouchableOpacity style={styles.bottomTab}>
-              <LayoutGrid size={22} color="#71717A" />
-              <Text style={styles.bottomTabText}>Kanban</Text>
-           </TouchableOpacity>
-         </Link>
-         <Link href="/(tabs)/projects" asChild>
-           <TouchableOpacity style={styles.bottomTab}>
-              <ProjectorIcon size={22} color="#71717A" />
-              <Text style={styles.bottomTabText}>Projects</Text>
-           </TouchableOpacity>
-         </Link>
-         <Link href="/(tabs)/team" asChild>
-           <TouchableOpacity style={styles.bottomTab}>
-              <Users size={22} color="#71717A" />
-              <Text style={styles.bottomTabText}>Teams</Text>
-           </TouchableOpacity>
-         </Link>
+         <Link href="/(tabs)/dashboard" asChild><TouchableOpacity style={styles.bottomTab}><HomeIcon size={22} color="#71717A" /><Text style={styles.bottomTabText}>Home</Text></TouchableOpacity></Link>
+         <Link href="/(tabs)/kanban" asChild><TouchableOpacity style={styles.bottomTab}><LayoutGrid size={22} color="#71717A" /><Text style={styles.bottomTabText}>Kanban</Text></TouchableOpacity></Link>
+         <Link href="/(tabs)/projects" asChild><TouchableOpacity style={styles.bottomTab}><ProjectorIcon size={22} color="#71717A" /><Text style={styles.bottomTabText}>Projects</Text></TouchableOpacity></Link>
+         <Link href="/(tabs)/team" asChild><TouchableOpacity style={styles.bottomTab}><Users size={22} color="#71717A" /><Text style={styles.bottomTabText}>Teams</Text></TouchableOpacity></Link>
          
          {/* ACTIVE STATE */}
-                <View style={styles.navActiveItem}>
-                   <TimelineIcon size={20} color="#6366F1" />
-                   <Text style={styles.navActiveText}>TimeLine</Text>
-                </View>
-                
-                 <Link href="/(tabs)/settings" asChild>
-           <TouchableOpacity style={styles.bottomTab}>
-              <SettingsIcon size={22} color="#71717A" />
-              <Text style={styles.bottomTabText}>Settings</Text>
-           </TouchableOpacity>
-         </Link>
+         <View style={styles.navActiveItem}>
+            <TimelineIcon size={20} color="#6366F1" />
+            <Text style={styles.navActiveText}>TimeLine</Text>
+         </View>
       </View>
     </SafeAreaView>
   );
 }
 
-// --- Ultra-Premium Stylesheet ---
+// --- Stylesheet ---
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000000' },
   centerContainer: { flex: 1, backgroundColor: '#000000', justifyContent: 'center', alignItems: 'center' },
   loadingText: { color: '#71717A', marginTop: 16, fontSize: 14, fontWeight: '600' },
-  
-  // Top Input Area
-  topContainer: { padding: 16, paddingTop: Platform.OS === 'android' ? 40 : 16, backgroundColor: '#000000', borderBottomWidth: 1, borderBottomColor: '#18181B' },
-  inputRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#111113', borderRadius: 16, paddingHorizontal: 12, height: 56, marginBottom: 16, borderWidth: 1, borderColor: '#27272A' },
-  textInput: { flex: 1, color: '#FAFAFA', fontSize: 16, marginLeft: 8 },
-  addButton: { width: 36, height: 36, backgroundColor: '#6366F1', borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  assignLabel: { color: '#71717A', fontSize: 11, fontWeight: '800', letterSpacing: 1, marginBottom: 12, marginLeft: 4 },
-  projectScroll: { paddingBottom: 4 },
-  projectPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#111113', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, marginRight: 10, borderWidth: 1, borderColor: '#27272A' },
-  projectPillActive: { backgroundColor: '#FAFAFA', borderColor: '#FAFAFA' },
-  projectPillIcon: { fontSize: 14, marginRight: 6 },
-  projectPillText: { color: '#A1A1AA', fontSize: 13, fontWeight: '700' },
-  projectPillTextActive: { color: '#000000', fontWeight: '800' },
-  
-  // Scroll & Notes
-  mainScroll: { padding: 20, paddingBottom: 120 },
-  emptyContainer: { alignItems: 'center', justifyContent: 'center', marginTop: 60 },
-  emptyTitle: { color: '#FAFAFA', fontSize: 20, fontWeight: '900', marginTop: 16, marginBottom: 8 },
-  emptySub: { color: '#71717A', fontSize: 14, textAlign: 'center', paddingHorizontal: 40 },
+  ambientGlow: { position: 'absolute', width: 300, height: 300, borderRadius: 150, filter: 'blur(80px)' },
 
-  scheduleHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-  scheduleTitle: { color: '#FAFAFA', fontSize: 14, fontWeight: '900', letterSpacing: 1.5 },
-  generatedBadge: { backgroundColor: 'rgba(16, 185, 129, 0.1)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(16, 185, 129, 0.2)' },
-  generatedText: { color: '#10B981', fontSize: 10, fontWeight: '900', letterSpacing: 1 },
+  // Header & Dates
+  headerContainer: { paddingTop: 10, paddingBottom: 16, backgroundColor: 'rgba(0,0,0,0.8)', borderBottomWidth: 1, borderBottomColor: '#18181B' },
+  headerTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, marginBottom: 20 },
+  greetingText: { color: '#FAFAFA', fontSize: 24, fontWeight: '900', letterSpacing: -0.5 },
+  dateLabel: { color: '#A1A1AA', fontSize: 13, fontWeight: '600', marginTop: 2 },
+  fabButton: { width: 44, height: 44, backgroundColor: '#6366F1', borderRadius: 22, alignItems: 'center', justifyContent: 'center', shadowColor: '#6366F1', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.4, shadowRadius: 8 },
   
-  notesCard: { backgroundColor: '#111113', borderRadius: 20, padding: 20, marginBottom: 32, borderWidth: 1, borderColor: '#1F1F22' },
-  notesHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
-  notesTitle: { color: '#8B5CF6', fontSize: 11, fontWeight: '900', letterSpacing: 1.5, marginLeft: 8 },
-  notesBody: { color: '#A1A1AA', fontSize: 14, lineHeight: 22 },
-  
-  // Timeline Data
-  timelineContainer: { paddingLeft: 4 },
-  timelineRow: { flexDirection: 'row', marginBottom: 16, minHeight: 80 },
-  
-  timeColumn: { width: 56, alignItems: 'flex-end', paddingRight: 16, position: 'relative' },
+  dateScroll: { paddingHorizontal: 16, paddingBottom: 4 },
+  dateBlock: { width: 60, height: 75, backgroundColor: '#09090B', borderRadius: 16, justifyContent: 'center', alignItems: 'center', marginHorizontal: 4, borderWidth: 1, borderColor: '#18181B' },
+  dateBlockToday: { borderColor: '#3F3F46' },
+  dateBlockSelected: { backgroundColor: '#FAFAFA', borderColor: '#FAFAFA', transform: [{ scale: 1.05 }] },
+  dateDayName: { color: '#71717A', fontSize: 11, fontWeight: '800', marginBottom: 4 },
+  dateDayNum: { color: '#FAFAFA', fontSize: 20, fontWeight: '900' },
+  todayDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#6366F1', marginTop: 4 },
+
+  // Main Scroll & Dashboard
+  mainScroll: { padding: 20, paddingBottom: 120 },
+  dashboardCard: { backgroundColor: '#09090B', borderRadius: 20, padding: 20, marginBottom: 32, borderWidth: 1, borderColor: '#1F1F22' },
+  progressHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 12 },
+  progressTitle: { color: '#A1A1AA', fontSize: 11, fontWeight: '900', letterSpacing: 1.5 },
+  progressStats: { color: '#FAFAFA', fontSize: 14, fontWeight: '800' },
+  progressBarBg: { height: 6, backgroundColor: '#18181B', borderRadius: 3, overflow: 'hidden', marginBottom: 16 },
+  progressBarFill: { height: '100%', backgroundColor: '#6366F1', borderRadius: 3 },
+  aiInsightBox: { flexDirection: 'row', backgroundColor: 'rgba(167, 139, 250, 0.08)', padding: 12, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(167, 139, 250, 0.15)' },
+  aiInsightText: { color: '#C4B5FD', fontSize: 13, lineHeight: 20, marginLeft: 10, flex: 1, fontWeight: '500' },
+
+  // Empty State
+  emptyContainer: { alignItems: 'center', justifyContent: 'center', marginTop: 40, padding: 20 },
+  emptyIconBg: { width: 64, height: 64, borderRadius: 32, backgroundColor: '#111113', alignItems: 'center', justifyContent: 'center', marginBottom: 16, borderWidth: 1, borderColor: '#27272A' },
+  emptyTitle: { color: '#FAFAFA', fontSize: 20, fontWeight: '800', marginBottom: 8 },
+  emptySub: { color: '#71717A', fontSize: 14, textAlign: 'center', lineHeight: 22 },
+
+  // Timeline
+  timelineContainer: { paddingLeft: 0 },
+  timelineRow: { flexDirection: 'row', marginBottom: 16, minHeight: 85 },
+  timeColumn: { width: 60, alignItems: 'flex-end', paddingRight: 16, position: 'relative' },
   timeText: { color: '#71717A', fontSize: 13, fontWeight: '700', marginTop: 16 },
-  amPmText: { color: '#FAFAFA', fontSize: 10, fontWeight: '900', marginTop: 2 },
+  timeTextNow: { color: '#6366F1', fontWeight: '900' },
+  amPmText: { color: '#52525B', fontSize: 10, fontWeight: '800', marginTop: 2 },
   
-  lineContainer: { position: 'absolute', right: -6, top: 22, alignItems: 'center', bottom: -30 },
-  timelineDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: '#27272A', zIndex: 10 },
-  timelineDotNow: { backgroundColor: '#FAFAFA', shadowColor: '#FAFAFA', shadowOpacity: 0.8, shadowRadius: 10, shadowOffset: { width: 0, height: 0 } },
-  timelineLine: { width: 2, flex: 1, backgroundColor: '#1F1F22', marginTop: -2 },
-  timelineLineCompleted: { backgroundColor: '#10B981' },
+  lineContainer: { position: 'absolute', right: -6, top: 22, alignItems: 'center', bottom: -40 },
+  timelineDot: { width: 12, height: 12, borderRadius: 6, zIndex: 10 },
+  timelineLine: { width: 2, flex: 1, backgroundColor: '#18181B', marginTop: -2 },
+  timelineLineCompleted: { backgroundColor: 'rgba(16, 185, 129, 0.3)' },
+
+  // Task Cards
+  taskCard: { flex: 1, backgroundColor: '#09090B', borderRadius: 20, padding: 16, borderWidth: 1, borderColor: '#1F1F22', marginLeft: 16, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
+  taskCardNow: { borderColor: '#6366F1', backgroundColor: '#111113' },
+  taskCardCompleted: { opacity: 0.5, borderColor: '#18181B' },
+  taskCardUrgent: { borderColor: 'rgba(239, 68, 68, 0.3)', backgroundColor: 'rgba(239, 68, 68, 0.02)' },
   
-  taskCard: { flex: 1, backgroundColor: '#09090B', borderRadius: 20, padding: 16, borderWidth: 1, borderColor: '#1F1F22', marginLeft: 16 },
-  taskCardNow: { borderColor: '#52525B', backgroundColor: '#111113' },
-  taskCardCompleted: { opacity: 0.6 },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 },
+  badgesRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, flex: 1 },
+  categoryPill: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
+  categoryText: { fontSize: 9, fontWeight: '900', letterSpacing: 0.5 },
+  priorityPill: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6, paddingVertical: 4, borderRadius: 6 },
+  priorityText: { fontSize: 9, fontWeight: '900', letterSpacing: 0.5 },
   
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  categoryRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
-  categoryPill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
-  categoryText: { fontSize: 9, fontWeight: '900', letterSpacing: 1 },
-  nowPill: { backgroundColor: '#FAFAFA', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
-  nowText: { color: '#000', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
-  projectMiniPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#18181B', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#27272A' },
-  projectMiniText: { color: '#A1A1AA', fontSize: 9, fontWeight: '800', marginLeft: 4 },
+  nowBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(99, 102, 241, 0.15)', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: 'rgba(99, 102, 241, 0.3)' },
+  nowPulse: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#818CF8', marginRight: 6 },
+  nowBadgeText: { color: '#818CF8', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
   
-  timeRangeText: { color: '#71717A', fontSize: 11, fontWeight: '700' },
+  durationText: { color: '#71717A', fontSize: 11, fontWeight: '700', marginLeft: 8 },
   timeRangeCompleted: { textDecorationLine: 'line-through', color: '#52525B' },
   
   cardBody: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  taskTitle: { color: '#D4D4D8', fontSize: 16, fontWeight: '700', flex: 1, lineHeight: 22 },
+  taskTitle: { color: '#E4E4E7', fontSize: 16, fontWeight: '700', lineHeight: 22, marginBottom: 6 },
   taskTitleNow: { color: '#FAFAFA', fontWeight: '800' },
   taskTitleCompleted: { color: '#52525B', textDecorationLine: 'line-through' },
-  checkCircleBtn: { padding: 4, marginLeft: 12 },
   
-  // Modal
+  projectContext: { flexDirection: 'row', alignItems: 'center' },
+  projectContextText: { color: '#A1A1AA', fontSize: 12, fontWeight: '600', marginLeft: 6 },
+  
+  quickCompleteBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#18181B', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#27272A' },
+  quickCompleteBtnActive: { backgroundColor: 'rgba(16, 185, 129, 0.1)', borderColor: 'rgba(16, 185, 129, 0.3)' },
+
+  // Modals
   modalOverlay: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.85)' },
-  modalContent: { backgroundColor: '#09090B', padding: 24, borderTopLeftRadius: 32, borderTopRightRadius: 32, borderWidth: 1, borderColor: '#27272A' },
+  actionSheet: { backgroundColor: '#09090B', borderTopLeftRadius: 32, borderTopRightRadius: 32, padding: 24, paddingBottom: 40, borderWidth: 1, borderColor: '#27272A' },
   modalDragIndicator: { width: 40, height: 4, backgroundColor: '#27272A', borderRadius: 2, alignSelf: 'center', marginBottom: 24 },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
-  modalTitle: { color: '#FAFAFA', fontSize: 22, fontWeight: '900' },
-  closeBtn: { width: 36, height: 36, backgroundColor: '#18181B', borderRadius: 18, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#27272A' },
+  actionSheetTitle: { color: '#FAFAFA', fontSize: 18, fontWeight: '800', marginBottom: 24, textAlign: 'center' },
+  actionButton: { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: '#18181B' },
+  actionButtonDestructive: { borderBottomWidth: 0, marginTop: 8 },
+  actionButtonText: { color: '#FAFAFA', fontSize: 16, fontWeight: '600', marginLeft: 16 },
+
+  fullModalContent: { backgroundColor: '#09090B', height: '90%', borderTopLeftRadius: 32, borderTopRightRadius: 32, padding: 24, borderWidth: 1, borderColor: '#27272A' },
+  modalHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 30 },
+  modalTitle: { color: '#FAFAFA', fontSize: 24, fontWeight: '900' },
+  closeBtn: { width: 40, height: 40, backgroundColor: '#18181B', borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   
-  inputLabel: { color: '#A1A1AA', fontSize: 10, fontWeight: '900', letterSpacing: 1.5, marginBottom: 8, marginLeft: 4 },
+  inputLabel: { color: '#71717A', fontSize: 10, fontWeight: '900', letterSpacing: 1.5, marginBottom: 12, marginTop: 8 },
   modalInput: { backgroundColor: '#111113', color: '#FAFAFA', padding: 18, borderRadius: 16, marginBottom: 20, fontSize: 16, fontWeight: '600', borderWidth: 1, borderColor: '#27272A' },
   rowInputs: { flexDirection: 'row' },
   
-  categoryGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginBottom: 24 },
-  modalCatBtn: { width: '48%', padding: 16, borderRadius: 14, backgroundColor: '#111113', alignItems: 'center', marginBottom: 12, borderWidth: 1, borderColor: '#27272A' },
-  modalCatText: { fontWeight: '800', fontSize: 11, letterSpacing: 1 },
+  modalCatBtn: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 12, backgroundColor: '#111113', marginRight: 10, borderWidth: 1, borderColor: '#27272A' },
+  modalCatText: { fontWeight: '800', fontSize: 12, letterSpacing: 1 },
   
-  saveBtn: { backgroundColor: '#FAFAFA', padding: 18, borderRadius: 16, alignItems: 'center', marginTop: 10 },
+  priorityGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 24 },
+  prioBtn: { flex: 1, minWidth: '45%', paddingVertical: 14, borderRadius: 12, backgroundColor: '#111113', alignItems: 'center', borderWidth: 1, borderColor: '#27272A' },
+  prioText: { fontSize: 12, fontWeight: '800', letterSpacing: 1 },
+
+  projectSelectBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 12, backgroundColor: '#111113', marginRight: 10, borderWidth: 1, borderColor: '#27272A' },
+  projectSelectBtnActive: { backgroundColor: '#FAFAFA', borderColor: '#FAFAFA' },
+  projectSelectIcon: { fontSize: 14, marginRight: 8 },
+  projectSelectText: { color: '#A1A1AA', fontSize: 13, fontWeight: '700' },
+
+  modalFooter: { paddingTop: 20, borderTopWidth: 1, borderTopColor: '#18181B' },
+  saveBtn: { backgroundColor: '#FAFAFA', padding: 18, borderRadius: 16, alignItems: 'center' },
   saveBtnText: { color: '#000', fontWeight: '900', fontSize: 16 },
-  
+
   // Bottom Nav
   bottomNav: { position: 'absolute', bottom: 0, width: '100%', backgroundColor: 'rgba(9, 9, 11, 0.95)', borderTopWidth: 1, borderTopColor: '#27272A', paddingVertical: Platform.OS === 'ios' ? 20 : 12, flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center' },
   bottomTab: { alignItems: 'center', width: 60 },
   bottomTabText: { color: '#71717A', fontSize: 10, marginTop: 6, fontWeight: '600' },
-  navActiveItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(16, 185, 129, 0.15)', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 100, borderWidth: 1, borderColor: 'rgba(16, 185, 129, 0.3)' },
-  navActiveText: { color: '#10B981', fontSize: 12, fontWeight: '800', marginLeft: 8 }
+  navActiveItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(99, 102, 241, 0.15)', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 100, borderWidth: 1, borderColor: 'rgba(99, 102, 241, 0.3)' },
+  navActiveText: { color: '#6366F1', fontSize: 12, fontWeight: '800', marginLeft: 8 }
 });

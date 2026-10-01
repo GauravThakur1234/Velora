@@ -26,7 +26,7 @@ const COLUMN_WIDTH = width * 0.82;
 // --- Types & Configurations ---
 type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'REVIEW' | 'DONE';
 type TaskPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
-type ViewMode = 'BOARD' | 'LIST';
+type ViewMode = 'BOARD' | 'LIST' | 'SCRUM';
 
 type KanbanTask = {
   id: string;
@@ -92,7 +92,7 @@ export default function PersonalKanban() {
       const { data, error } = await supabase
         .from('user_kanban_tasks')
         .select('*')
-        .eq('clerk_user_id', user.id) // 🔒 Fetch ONLY this user's data
+        .eq('clerk_user_id', user.id)
         .order('created_at', { ascending: false });
         
       if (error) throw error;
@@ -177,7 +177,7 @@ export default function PersonalKanban() {
     setModalVisible(true);
   };
 
-  // --- Search and Filltering -----
+  // --- Search and Filtering -----
   const filteredTasks = useMemo(() => {
     let result = tasks;
     
@@ -187,19 +187,27 @@ export default function PersonalKanban() {
       result = result.filter(t => t.title.toLowerCase().includes(lowerQ) || t.project_name?.toLowerCase().includes(lowerQ));
     }
     
-    // Quick Filltering
+    // Quick Filtering
     if (activeFilter === 'URGENT') result = result.filter(t => t.priority === 'URGENT' || t.priority === 'HIGH');
     if (activeFilter === 'TODAY') result = result.filter(t => t.due_date === getTodayStr());
     
     return result;
   }, [tasks, searchQuery, activeFilter]);
 
+  // --- Scrum Specific Filtering ---
+  const activeSprintTasks = useMemo(() => {
+    return filteredTasks.filter(t => t.status !== 'TODO' || t.due_date <= getTodayStr());
+  }, [filteredTasks]);
+
+  const backlogTasks = useMemo(() => {
+    return filteredTasks.filter(t => t.status === 'TODO' && t.due_date > getTodayStr());
+  }, [filteredTasks]);
+
   // --- Sub-Components ---
   const TaskCard = ({ task, isList = false }: { task: KanbanTask, isList?: boolean }) => {
     const prioConfig = PRIORITY_CONFIG[task.priority];
     const statConfig = STATUS_CONFIG[task.status];
     
-    // Format Date: e.g., "Today", "Tomorrow", or "Oct 12"
     const isToday = task.due_date === getTodayStr();
     let dateLabel = isToday ? 'Today' : new Date(task.due_date).toLocaleString('default', { month: 'short', day: 'numeric' });
 
@@ -326,6 +334,9 @@ export default function PersonalKanban() {
             <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setViewMode('LIST'); }} style={[styles.toggleBtn, viewMode === 'LIST' && styles.toggleActive]}>
               <LayoutList size={18} color={viewMode === 'LIST' ? '#FAFAFA' : '#71717A'} />
             </TouchableOpacity>
+            <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setViewMode('SCRUM'); }} style={[styles.toggleBtn, viewMode === 'SCRUM' && styles.toggleActive]}>
+              <FolderKanban size={18} color={viewMode === 'SCRUM' ? '#FAFAFA' : '#71717A'} />
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -336,16 +347,16 @@ export default function PersonalKanban() {
               <Text style={[styles.filterChipText, activeFilter === 'ALL' && styles.filterChipTextActive]}>All Tasks</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={() => setActiveFilter('URGENT')} style={[styles.filterChip, activeFilter === 'URGENT' && styles.filterChipActive]}>
-              <Text style={[styles.filterChipText, activeFilter === 'URGENT' && styles.filterChipTextActive]}>🔥 High Priority</Text>
+              <Text style={[styles.filterChipText, activeFilter === 'URGENT' && styles.filterChipTextActive]}>🚨 High Priority</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={() => setActiveFilter('TODAY')} style={[styles.filterChip, activeFilter === 'TODAY' && styles.filterChipActive]}>
-              <Text style={[styles.filterChipText, activeFilter === 'TODAY' && styles.filterChipTextActive]}>📅 Due Today</Text>
+              <Text style={[styles.filterChipText, activeFilter === 'TODAY' && styles.filterChipTextActive]}>⏱️ Due Today</Text>
             </TouchableOpacity>
           </ScrollView>
         </View>
       </View>
 
-      {/* --- Main Board/List Area --- */}
+      {/* --- Main Board / List / Scrum Area --- */}
       {filteredTasks.length === 0 ? (
         <View style={styles.emptyContainer}>
           <View style={styles.emptyIconWrap}><LayoutGrid size={40} color="#3F3F46" /></View>
@@ -366,7 +377,7 @@ export default function PersonalKanban() {
         >
           {STATUS_ORDER.map(status => <BoardColumn key={status} status={status} />)}
         </ScrollView>
-      ) : (
+      ) : viewMode === 'LIST' ? (
         <ScrollView 
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.listScroll}
@@ -388,6 +399,53 @@ export default function PersonalKanban() {
               </View>
             );
           })}
+        </ScrollView>
+      ) : (
+        /* SCRUM VIEW */
+        <ScrollView 
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.listScroll}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => fetchTasks(true)} tintColor="#FAFAFA" />}
+        >
+          {/* Active Sprint Section */}
+          <View style={styles.scrumSection}>
+            <View style={[styles.scrumSectionHeader, { borderLeftColor: '#8B5CF6' }]}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                <View>
+                  <Text style={styles.scrumSectionTitle}>Active Sprint</Text>
+                  <Text style={styles.scrumSectionSub}>Tasks currently in progress or due today</Text>
+                </View>
+                <View style={styles.badgeCount}>
+                  <Text style={styles.badgeText}>{activeSprintTasks.length}</Text>
+                </View>
+              </View>
+            </View>
+            {activeSprintTasks.length === 0 ? (
+               <Text style={styles.emptyScrumText}>No active tasks in this sprint.</Text>
+            ) : (
+               activeSprintTasks.map(task => <TaskCard key={task.id} task={task} isList={true} />)
+            )}
+          </View>
+
+          {/* Product Backlog Section */}
+          <View style={styles.scrumSection}>
+            <View style={[styles.scrumSectionHeader, { borderLeftColor: '#A1A1AA' }]}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                <View>
+                  <Text style={styles.scrumSectionTitle}>Product Backlog</Text>
+                  <Text style={styles.scrumSectionSub}>Prioritized queue for future sprints</Text>
+                </View>
+                <View style={styles.badgeCount}>
+                  <Text style={styles.badgeText}>{backlogTasks.length}</Text>
+                </View>
+              </View>
+            </View>
+            {backlogTasks.length === 0 ? (
+               <Text style={styles.emptyScrumText}>Backlog is empty.</Text>
+            ) : (
+               backlogTasks.map(task => <TaskCard key={task.id} task={task} isList={true} />)
+            )}
+          </View>
         </ScrollView>
       )}
 
@@ -486,8 +544,8 @@ export default function PersonalKanban() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Global FAB */}
-      {viewMode === 'LIST' && (
+      {/* Global FAB (Available on List & Scrum Views) */}
+      {(viewMode === 'LIST' || viewMode === 'SCRUM') && (
         <TouchableOpacity style={styles.fabMain} onPress={() => openModal()} activeOpacity={0.8}>
           <Plus size={28} color="#FAFAFA" strokeWidth={3} />
         </TouchableOpacity>
@@ -583,7 +641,7 @@ const styles = StyleSheet.create({
   addIconBtn: { padding: 4 },
   columnScroll: { paddingBottom: 40 },
   
-  // List View (Vertical)
+  // List & Scrum View (Vertical)
   listScroll: { paddingHorizontal: 20, paddingBottom: 100, paddingTop: 20 },
   listGroup: { marginBottom: 36 },
   listGroupHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
@@ -591,6 +649,13 @@ const styles = StyleSheet.create({
   listGroupCount: { backgroundColor: '#18181B', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, marginLeft: 8, borderWidth: 1, borderColor: '#27272A' },
   listGroupCountText: { color: '#A1A1AA', fontSize: 11, fontWeight: '900' },
   
+  // Scrum Specific Styles
+  scrumSection: { marginBottom: 36 },
+  scrumSectionHeader: { marginBottom: 16, backgroundColor: '#111113', padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#27272A', borderLeftWidth: 4 },
+  scrumSectionTitle: { color: '#FAFAFA', fontSize: 16, fontWeight: '900', letterSpacing: 0.5 },
+  scrumSectionSub: { color: '#71717A', fontSize: 12, marginTop: 4, fontWeight: '600' },
+  emptyScrumText: { color: '#71717A', fontSize: 13, fontStyle: 'italic', textAlign: 'center', marginTop: 8, marginBottom: 16 },
+
   // Cards
   card: { backgroundColor: '#111113', borderRadius: 16, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: '#1F1F22', borderLeftWidth: 4 },
   cardList: { backgroundColor: '#09090B' },
