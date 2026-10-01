@@ -1,0 +1,56 @@
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css";
+
+@import "nativewind/theme";
+
+/*
+  Waypoint design tokens.
+  Light and dark are both defined as first-class colors (not CSS variables
+  that flip), and applied per-component with the `dark:` variant, e.g.
+  `bg-paper-0 dark:bg-ink-900`. This keeps every screen explicit about its
+  own light/dark surfaces instead of relying on a single implicit swap.
+*/
+@theme {
+  --font-display: "Sora";
+  --font-body: "Inter";
+
+  /* Neutrals — light */
+  --color-paper-0: #ffffff;
+  --color-paper-50: #fafafa;
+  --color-paper-100: #f2f3f5;
+  --color-line-200: #e7e9ee;
+  --color-ink-700: #4b5157;
+  --color-ink-800: #23262b;
+  --color-ink-950: #14171c;
+
+  /* Neutrals — dark */
+  --color-night-950: #0b0e14;
+  --color-night-900: #12151c;
+  --color-night-800: #1b2029;
+  --color-night-line: #262b35;
+  --color-mist-300: #9aa1ac;
+  --color-mist-50: #f4f5f7;
+
+  /* Brand */
+  --color-brand-700: #28409c;
+  --color-brand-600: #3454d1;
+  --color-brand-500: #4c6ef0;
+  --color-brand-100: #e4e9fd;
+
+  /* Accent + semantic */
+  --color-verdant-600: #12946b;
+  --color-verdant-100: #dcf3e9;
+  --color-amber-600: #c77d14;
+  --color-amber-100: #f9ead0;
+  --color-rose-600: #d6455a;
+  --color-rose-100: #fbdfe3;
+  --color-violet-600: #7c3aed;
+
+  /* Radius scale — deliberately not identical everywhere */
+  --radius-xs: 8px;
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+}
